@@ -23,9 +23,9 @@
 - **证书策略只有两种结果**：`Allow`（允许列表命中）与 `Ask`（需要询问）。不维护拒绝列表
 - **错误页重试**用自定义 scheme `codeclient://retry`，不引入 JS 桥接类
 - **提交粒度**：每个 Task 结束提交一次，提交信息用 `feat:` / `test:` / `chore:` 前缀
-- **本机环境注意**：本会话的 shell 沙箱无法对工作区应用写 ACL，**每条 pwsh 命令都必须带 `sandbox_permissions: "danger-full-access"` 与 `justification`**，否则会以 `SetNamedSecurityInfoW failed (Win32 5)` 失败。这是环境缺陷，不是命令写错
-- **本机没有 Rust 与 Android 工具链**，也没有 `adb`。所有「运行命令并检查输出」的步骤都依赖 Task 0 装好的本机 Rust；APK 的编译与验证依赖 CI
-- **验证边界**：CI 全绿只能证明「编译通过 + 纯逻辑单测通过 + APK 产出」。真机行为（自签名证书、长按手感、文件选择器、软键盘、剪贴板）必须真机手测，见 Task 17
+- **本机环境事实**（已实测，2026-09-23）：`cargo` / `rustup` / `rustc` / `gradle` / `adb` / `gh` 全部未安装；Java 只有 8（构建 JDK 需要 17）。**本机没有 Rust 与 Android 工具链**。所有「运行命令并检查输出」的步骤都依赖 Task 0 装好的本机 Rust；APK 的编译与验证依赖 CI
+- **`gh` CLI 未安装**：Task 5 起所有 `gh run ...` 命令都需要先 `winget install --id GitHub.cli -e` 并 `gh auth login`，否则改用浏览器打开 Actions 页面查看。计划里的 `gh` 命令不是可选项——没有它就无法确认 CI 结果，而 CI 是唯一的构建验证手段
+- **验证边界**：CI 全绿只能证明「编译通过 + 纯逻辑单测通过 + APK 产出」。真机行为（自签名证书、长按手感、文件选择器、软键盘、剪贴板）必须真机手测，见 Task 15 的验收清单
 
 ## File Structure
 
