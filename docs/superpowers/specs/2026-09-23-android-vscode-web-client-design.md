@@ -129,7 +129,7 @@ AppWebViewClient
   nativeUrlPolicy(url: String, hasGesture: Boolean): Int
                                           0=内部加载 1=跳系统浏览器 2=已由 Rust 处理
   nativeOnRenderProcessGone(didCrash: Boolean)
-  nativeSslDecision(host: String): Int     0=允许 1=拒绝 2=需询问
+  nativeSslDecision(host: String): Int     0=已记住允许 1=需要询问用户
 
 AppWebChromeClient
   nativeOnProgressChanged(progress: Int)  用于重置加载超时计时器
@@ -180,15 +180,16 @@ android.content.Intent
 
 ```
 onReceivedSslError 触发
-  → Kotlin 调 nativeSslDecision(host)
+  → Kotlin 取 host，调 nativeSslDecision(host)
       → Rust 查允许列表
-         命中      → 返回 0 → Kotlin: handler.proceed()
-         明确拒绝   → 返回 1 → Kotlin: handler.cancel() + 错误页
-         未命中     → 返回 2 → Kotlin: 弹 SslPrompt
+         命中    → 返回 0 → Kotlin: handler.proceed()
+         未命中   → 返回 1 → Kotlin: 弹 SslPrompt
                         用户"允许一次"   → handler.proceed()
                         用户"始终允许"   → nativeOnSslChoice(true, true) → handler.proceed()
                         用户"取消"       → nativeOnSslChoice(false, false) → handler.cancel() + 错误页
 ```
+
+注意策略只有"命中允许列表"和"需要询问"两种结果。用户点"取消"是**用户动作**而非策略判定，因此不需要在 Rust 里额外维护一份拒绝列表（YAGNI）。
 
 ## 7. 交互设计
 
@@ -206,14 +207,18 @@ onReceivedSslError 触发
 
 ```
 短按返回
-  ├─ 输入对话框可见        → 关闭对话框，回到网页
-  ├─ webView.canGoBack()   → goBack()
-  ├─ 已有页面、无历史       → 弹输入对话框
-  └─ 已在输入对话框、无历史  → finish()
+  ├─ 输入对话框可见
+  │    ├─ 已有页面  → 关闭对话框，回到网页
+  │    └─ 无页面    → finish()（输入框是唯一界面，没有可回退的内容）
+  ├─ canGoBack()   → goBack()
+  ├─ 已有页面       → 弹输入对话框
+  └─ 无页面         → finish()
 
 长按返回 (≥500 ms)
-  └─ 无视历史与当前状态      → 直接弹输入对话框
+  └─ 无视历史与当前状态 → 直接弹输入对话框
 ```
+
+六个分支互斥且穷尽，由 `NavState { dialog_visible, can_go_back, has_page }` 三个布尔量完全决定。
 
 长按判定的职责切分，写清楚避免歧义：
 
@@ -282,14 +287,21 @@ onReceivedSslError 触发
 
 | 输入 | 结果 |
 |---|---|
-| `https://code.example.com` | 原样 |
-| `code.example.com` | `https://code.example.com` |
-| `192.168.1.10:8080` | `http://192.168.1.10:8080` |
-| `http://192.168.1.10:8080` | 原样 |
-| `ftp://x` | 拒绝（仅接受 http / https） |
-| 空串 | 拒绝 |
+| `https://code.example.com` | `https://code.example.com/` |
+| `code.example.com` | `https://code.example.com/` |
+| `192.168.1.10:8080` | `http://192.168.1.10:8080/` |
+| `localhost:8080` | `http://localhost:8080/` |
+| `[::1]:8080` | `http://[::1]:8080/` |
+| `http://192.168.1.10:8080` | `http://192.168.1.10:8080/` |
+| `HTTPS://Code.Example.COM` | `https://code.example.com/` |
+| `https://x/f?q=1` | 原样（保留路径与查询串） |
+| `ftp://x` | 拒绝：`UnsupportedScheme("ftp")` |
+| 空串 / 全空白 | 拒绝：`Empty` |
+| `https://` | 拒绝：`Malformed` |
 
-主机判定：IPv4 字面量、IPv6 字面量（`[...]` 包裹）视为 IP；其余视为域名。
+主机判定：IPv4 字面量、以 `[` 开头的 IPv6 字面量、以及 `localhost` 视为"默认明文"，补 `http://`；其余视为域名，补 `https://`。
+
+输出统一为 `url` crate 的规范化形式（空路径补尾斜杠、scheme 与主机名转小写），因此上表结果是精确的字符串，可作为单测断言。
 
 ## 9. 工程结构
 
@@ -376,7 +388,7 @@ TDD 覆盖 Rust 纯逻辑层，四个模块都是无 Android 依赖的纯函数�
 |---|---|
 | `url` | 8.5 表格的每一行；IPv6 字面量；大小写；含路径与查询串；拒绝非 http/https |
 | `nav` | 7.2 状态机的每条转移；对话框可见时返回优先关闭对话框；无历史时 `finish()`；收到长按事件时无视历史直接弹输入对话框 |
-| `ssl` | 主机大小写不敏感匹配；允许列表命中/未命中；主机名与端口的匹配规则 |
+| `ssl` | 主机大小写不敏感匹配；允许列表命中 → `Allow`，未命中 → `Ask`；主机名与端口的匹配规则 |
 | `config` | 读写往返；文件缺失；文件损坏时回退到默认值而非 panic |
 
 `nav` 接收的是**已判定的事件**（短按 / 长按），不含 500 ms 计时逻辑——那在 Kotlin 侧（见 7.2）。因此 500 ms 阈值本身没有自动化测试覆盖，属于真机手测项。
